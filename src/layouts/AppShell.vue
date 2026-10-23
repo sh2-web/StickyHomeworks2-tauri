@@ -38,6 +38,8 @@ const {
   toggleMaximize: toggleWindowMaximize,
   toggleUnlocked: toggleWindowUnlocked,
   startDragging: startWindowDragging,
+  startPointerWindowDrag,
+  startTouchWindowDrag,
   setAlwaysOnBottom,
 } = useDesktopWindowControls();
 const {
@@ -189,10 +191,30 @@ provide(appContextKey, {
 });
 
 async function startWindowDrag(event: Event) {
-  if (event instanceof PointerEvent && event.pointerType !== "mouse") return;
   if (!isWindowUnlocked.value) return;
-  event.preventDefault();
-  await startWindowDragging();
+
+  if (event instanceof PointerEvent) {
+    event.preventDefault();
+    const target = event.currentTarget;
+    if (!(target instanceof HTMLElement)) return;
+    if (event.pointerType === "mouse") {
+      // 鼠标继续用系统标题栏移动循环（最顺滑）。
+      await startWindowDragging();
+      return;
+    }
+    if (event.pointerType === "touch" || event.pointerType === "pen") {
+      // 触摸/触控笔进不了 WM_NCLBUTTONDOWN 的移动循环，改用手动拖动。
+      startPointerWindowDrag(event, target);
+    }
+    return;
+  }
+
+  // 老内核兜底：PointerEvent 不可用时才用 TouchEvent。
+  if (event instanceof TouchEvent && typeof PointerEvent === "undefined") {
+    event.preventDefault();
+    const target = event.currentTarget;
+    if (target instanceof HTMLElement) startTouchWindowDrag(event, target);
+  }
 }
 
 function syncDrawerState(event: Event) {
