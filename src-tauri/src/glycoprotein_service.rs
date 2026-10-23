@@ -61,17 +61,14 @@ mod desktop {
     const NODE_START_RETRY_MIN_SECONDS: u64 = 30;
     const NODE_START_RETRY_MAX_SECONDS: u64 = 60;
 
-    /// 最近一次成功应用的窗口属性，用于跳过完全相同的重复应用。
+    /// 最近一次成功应用的非几何窗口属性，用于跳过完全相同的重复应用。
+    /// 位置/尺寸现在由 `tauri-plugin-window-state` 负责，这里不再比较它们。
     #[derive(Clone, Debug, PartialEq)]
     struct AppliedWindowSettings {
         visible: bool,
         title: String,
         always_on_bottom: bool,
         window_topmost: bool,
-        window_x: Option<f64>,
-        window_y: Option<f64>,
-        window_width: Option<f64>,
-        window_height: Option<f64>,
     }
 
     impl AppliedWindowSettings {
@@ -81,10 +78,6 @@ mod desktop {
                 title: settings.title.clone(),
                 always_on_bottom: settings.always_on_bottom,
                 window_topmost: settings.window_topmost,
-                window_x: settings.window_x,
-                window_y: settings.window_y,
-                window_width: settings.window_width,
-                window_height: settings.window_height,
             }
         }
     }
@@ -364,26 +357,8 @@ mod desktop {
             window.set_always_on_top(settings.window_topmost),
         );
 
-        if let (Some(x), Some(y)) = (settings.window_x, settings.window_y) {
-            match (coordinate(x, "X"), coordinate(y, "Y")) {
-                (Ok(x), Ok(y)) => collect_window_result(
-                    &mut errors,
-                    "position",
-                    window.set_position(Position::Physical(PhysicalPosition::new(x, y))),
-                ),
-                (x, y) => errors.extend([x.err(), y.err()].into_iter().flatten()),
-            }
-        }
-        if let (Some(width), Some(height)) = (settings.window_width, settings.window_height) {
-            match (dimension(width, "Width"), dimension(height, "Height")) {
-                (Ok(width), Ok(height)) => collect_window_result(
-                    &mut errors,
-                    "size",
-                    window.set_size(Size::Physical(PhysicalSize::new(width, height))),
-                ),
-                (width, height) => errors.extend([width.err(), height.err()].into_iter().flatten()),
-            }
-        }
+        // 位置/尺寸由 tauri-plugin-window-state 在窗口 ready 时恢复，
+        // 这里不再用 settings 里的旧几何覆盖插件结果。
 
         if errors.is_empty() {
             if let Ok(mut cache) = LAST_APPLIED.lock() {

@@ -18,7 +18,6 @@ import { initializeGlycoprotein, listenGlycoproteinWindowSettings } from "../ser
 import { logInfo, logWarn } from "../services/logging";
 import type { AppData, AppSettings } from "../types/app-data";
 import { MOBILE_LAYOUT_MAX_WIDTH, isBelow } from "../ui/breakpoints";
-import type { WindowGeometryPatch } from "./useDesktopWindowControls";
 
 type AppBootstrapOptions = {
   appData: Ref<AppData>;
@@ -27,11 +26,7 @@ type AppBootstrapOptions = {
   activeNavigation: () => string;
   load: () => Promise<void>;
   updateSettings: (mutate: (settings: AppSettings) => AppSettings) => Promise<void>;
-  initializeWindowControls: (
-    isMobileRuntime: boolean,
-    alwaysOnBottom: boolean,
-    onGeometryChanged?: (patch: WindowGeometryPatch) => void | Promise<void>,
-  ) => Promise<void>;
+  initializeWindowControls: (isMobileRuntime: boolean, alwaysOnBottom: boolean) => Promise<void>;
   setAlwaysOnBottom: (alwaysOnBottom: boolean) => Promise<boolean>;
   navigate: (path: string) => void;
 };
@@ -102,10 +97,6 @@ export function useAppBootstrap(options: AppBootstrapOptions) {
     return isUnchanged ? settings : { ...settings, ...patch };
   }
 
-  function persistWindowGeometry(geometry: WindowGeometryPatch): Promise<void> {
-    return options.updateSettings((settings) => mergeSettingsPatch(settings, geometry));
-  }
-
   function clearWindowShowFallback() {
     if (showFallbackTimer === undefined) return;
     window.clearTimeout(showFallbackTimer);
@@ -173,12 +164,13 @@ export function useAppBootstrap(options: AppBootstrapOptions) {
     } catch {
       loadError.value = "无法读取本地数据。请检查应用数据目录后重试。";
     }
-    await revealMainWindow("load-complete");
 
     if (!isMobileRuntime.value) {
       // 必须在 load() 之后注册：此前列表为空，事件会把默认空数据写盘。
       // 成功/失败都注册，保持事件通道可用。
       await registerRuntimeListeners();
+      // 窗口几何已由 window-state 插件在窗口 ready 时恢复（含旧数据的一次性迁移），
+      // 先初始化再显示，避免“先出现在默认位置、再跳到保存位置”。
       try {
         await initializeGlycoprotein();
       } catch (error) {
@@ -186,10 +178,11 @@ export function useAppBootstrap(options: AppBootstrapOptions) {
       }
     }
 
+    await revealMainWindow("load-complete");
+
     await options.initializeWindowControls(
       isMobileRuntime.value,
       options.appData.value.settings.alwaysOnBottom,
-      persistWindowGeometry,
     );
     stopAlwaysOnBottomWatch = watch(() => options.appData.value.settings.alwaysOnBottom, (alwaysOnBottom) => {
       void options.setAlwaysOnBottom(alwaysOnBottom);

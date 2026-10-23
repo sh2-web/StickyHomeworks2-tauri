@@ -3,29 +3,19 @@ import { getCurrentWindow, type Window } from "@tauri-apps/api/window";
 import { onUnmounted, ref } from "vue";
 import { flushLogs, logError, logInfo } from "../services/logging";
 
-export type WindowGeometryPatch = {
-  windowX?: number;
-  windowY?: number;
-  windowWidth?: number;
-  windowHeight?: number;
-};
-
-
+/**
+ * 桌面贴纸窗口的控制。
+ *
+ * 窗口位置/尺寸的持久化已交给 Rust 侧的 `tauri-plugin-window-state`，
+ * 这里不再采集/落盘几何，只负责窗口控制与最大化状态同步。
+ */
 export function useDesktopWindowControls() {
   const isDesktopWindow = ref(false);
   const isUnlocked = ref(false);
   const isMaximized = ref(false);
   const error = ref("");
   let unlistenResized: (() => void) | undefined;
-  let unlistenMoved: (() => void) | undefined;
-  let geometryTimer: number | undefined;
-  let pendingGeometry: WindowGeometryPatch = {};
-  let geometrySaveHandler: ((patch: WindowGeometryPatch) => void | Promise<void>) | undefined;
   let isClosing = false;
-  const minimumWindowWidth = 240;
-  // 与 domain/settings.ts 的 normalizeWindowDimension 和 Rust data.rs 的 240 下限保持一致，
-  // 否则 160–239 的窗口几何会被归一化丢弃。
-  const minimumWindowHeight = 240;
 
   function reportFailure(reason?: unknown) {
     logError("window.control.failure", reason ?? "窗口操作失败");
@@ -54,41 +44,7 @@ export function useDesktopWindowControls() {
     return runWindowAction("window.always-on-bottom", (window) => window.setAlwaysOnBottom(alwaysOnBottom));
   }
 
-
-  function scheduleGeometrySave(
-    patch: WindowGeometryPatch,
-    onGeometryChanged?: (patch: WindowGeometryPatch) => void | Promise<void>,
-  ) {
-    if (!onGeometryChanged || isClosing) return;
-    const nextWidth = patch.windowWidth;
-    const nextHeight = patch.windowHeight;
-    if (nextWidth !== undefined && (!Number.isFinite(nextWidth) || nextWidth < minimumWindowWidth)) return;
-    if (nextHeight !== undefined && (!Number.isFinite(nextHeight) || nextHeight < minimumWindowHeight)) return;
-    geometrySaveHandler = onGeometryChanged;
-    pendingGeometry = { ...pendingGeometry, ...patch };
-    if (geometryTimer !== undefined) window.clearTimeout(geometryTimer);
-    geometryTimer = window.setTimeout(() => {
-      geometryTimer = undefined;
-      void flushGeometrySave().catch(reportFailure);
-    }, 250);
-  }
-
-  async function flushGeometrySave() {
-    if (geometryTimer !== undefined) {
-      window.clearTimeout(geometryTimer);
-      geometryTimer = undefined;
-    }
-    if (!geometrySaveHandler || Object.keys(pendingGeometry).length === 0) return;
-    const geometry = pendingGeometry;
-    pendingGeometry = {};
-    await geometrySaveHandler(geometry);
-  }
-
-  async function initialize(
-    isMobileRuntime: boolean,
-    alwaysOnBottom: boolean,
-    onGeometryChanged?: (patch: WindowGeometryPatch) => void | Promise<void>,
-  ) {
+  async function initialize(isMobileRuntime: boolean, alwaysOnBottom: boolean) {
     isDesktopWindow.value = isTauri() && !isMobileRuntime;
     if (!isDesktopWindow.value) return;
 
@@ -98,42 +54,11 @@ export function useDesktopWindowControls() {
       await appWindow.setAlwaysOnBottom(alwaysOnBottom);
       await syncMaximized(appWindow);
       unlistenResized?.();
-      unlistenMoved?.();
-      unlistenResized = await appWindow.onResized(({ payload }) => {
-        if (isClosing || payload.width < minimumWindowWidth || payload.height < minimumWindowHeight) return;
-        logInfo("window.resize", "窗口尺寸已变化");
-        void syncMaximized(appWindow)
-          .then(() => {
-            if (!isMaximized.value) {
-              scheduleGeometrySave({ windowWidth: payload.width, windowHeight: payload.height }, onGeometryChanged);
-            }
-          })
-          .catch(reportFailure);
-      });
-      unlistenMoved = await appWindow.onMoved(({ payload }) => {
+      // 只同步最大化状态：位置/尺寸由 window-state 插件负责持久化与恢复。
+      unlistenResized = await appWindow.onResized(() => {
         if (isClosing) return;
-        void appWindow.isMaximized()
-          .then((maximized) => {
-            if (isClosing) return;
-            if (!maximized && Number.isFinite(payload.x) && Number.isFinite(payload.y)
-              && payload.x !== -32000 && payload.y !== -32000
-              && payload.x >= -2147483648 && payload.x <= 2147483647
-              && payload.y >= -2147483648 && payload.y <= 2147483647) {
-              scheduleGeometrySave({ windowX: payload.x, windowY: payload.y }, onGeometryChanged);
-            }
-          })
-          .catch(reportFailure);
+        void syncMaximized(appWindow).catch(reportFailure);
       });
-      if (!isMaximized.value) {
-        const [position, size] = await Promise.all([appWindow.outerPosition(), appWindow.outerSize()]);
-        const initialGeometry: WindowGeometryPatch = {
-          windowWidth: size.width,
-          windowHeight: size.height,
-        };
-        if (Number.isFinite(position.x) && position.x !== -32000) initialGeometry.windowX = position.x;
-        if (Number.isFinite(position.y) && position.y !== -32000) initialGeometry.windowY = position.y;
-        scheduleGeometrySave(initialGeometry, onGeometryChanged);
-      }
     } catch (reason) {
       reportFailure(reason);
     }
@@ -143,8 +68,6 @@ export function useDesktopWindowControls() {
     if (isClosing) return;
     isClosing = true;
     unlistenResized?.();
-    unlistenMoved?.();
-    await flushGeometrySave().catch(reportFailure);
     await flushLogs();
     // 关闭窗口 = 退出应用。这里显式调用 quit_application（app.exit），
     // 而不是只关闭窗口：tray-menu 是常驻隐藏窗口，只关窗口会让进程留在后台。
@@ -159,10 +82,9 @@ export function useDesktopWindowControls() {
     if (!closed) isClosing = false;
   }
 
-async function startDragging() {
-  return runWindowAction("window.drag-start", (window) => window.startDragging());
-}
-
+  async function startDragging() {
+    return runWindowAction("window.drag-start", (window) => window.startDragging());
+  }
 
   async function minimize() {
     await runWindowAction("window.minimize", (window) => window.minimize());
@@ -187,8 +109,6 @@ async function startDragging() {
 
   onUnmounted(() => {
     unlistenResized?.();
-    unlistenMoved?.();
-    if (!isClosing) void flushGeometrySave().catch(reportFailure);
   });
 
   return {

@@ -9,7 +9,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 use serde::Serialize;
 
-use crate::data::AppData;
+use crate::data::{AppData, AppSettings};
 use crate::diagnostics::{
     diagnostic_report as create_diagnostic_report, DiagnosticDisclosure, DiagnosticEnvironment,
 };
@@ -239,7 +239,7 @@ pub(crate) async fn initialize_glycoprotein(
     glycoprotein: State<'_, GlycoproteinService>,
     request_id: Option<String>,
 ) -> Result<GlycoproteinStatus, String> {
-    let data = {
+    let mut data = {
         let _guard = coordinator.operation.lock().map_err(|error| {
             record_error(&app, "app-data.lock", error.to_string(), request_id.clone())
         })?;
@@ -252,8 +252,20 @@ pub(crate) async fn initialize_glycoprotein(
             )
         })?
     };
-    let (_, status) =
+    // 一次性迁移：旧版本把窗口几何存在 settings 里，现在由 window-state 插件接管。
+    let migrated = migrate_legacy_window_geometry(&app, &mut data);
+    let (mut data, status) =
         synchronize_runtime(&app, &coordinator, &glycoprotein, data, request_id.clone()).await?;
+    if migrated {
+        let _guard = coordinator.operation.lock().map_err(|error| {
+            record_error(&app, "app-data.lock", error.to_string(), request_id.clone())
+        })?;
+        let path = app_state_path(&app)
+            .map_err(|error| record_error(&app, "app-data.path", error, request_id.clone()))?;
+        if let Err(error) = write_app_data(&path, &mut data) {
+            let _ = record_error(&app, "window.geometry.migrate.save", error, request_id.clone());
+        }
+    }
     record_info(
         &app,
         "glycoprotein.initialize",
@@ -261,6 +273,73 @@ pub(crate) async fn initialize_glycoprotein(
         request_id,
     );
     Ok(status)
+}
+
+/// window-state 插件的状态文件路径（插件默认写在 app config dir 的 `.window-state.json`）。
+fn window_state_path(app: &AppHandle) -> Option<PathBuf> {
+    app.path()
+        .app_config_dir()
+        .ok()
+        .map(|directory| directory.join(".window-state.json"))
+}
+
+fn has_legacy_window_geometry(settings: &AppSettings) -> bool {
+    settings.window_x.is_some()
+        || settings.window_y.is_some()
+        || settings.window_width.is_some()
+        || settings.window_height.is_some()
+}
+
+/// 把旧版本存在 `settings` 里的窗口位置/尺寸迁移给 window-state 插件，并清空旧字段。
+///
+/// - 插件尚无状态文件时：先用旧值恢复一次窗口几何（之后插件会自己保存）；
+/// - 插件已有状态文件时：直接清空旧字段，避免旧值以后被误用；
+/// - 返回 `true` 表示调用方需要把清空后的数据写回磁盘。
+fn migrate_legacy_window_geometry(app: &AppHandle, data: &mut AppData) -> bool {
+    if !has_legacy_window_geometry(&data.settings) {
+        return false;
+    }
+
+    let plugin_has_state = window_state_path(app)
+        .map(|path| path.exists())
+        .unwrap_or(false);
+    if !plugin_has_state {
+        if let Some(window) = app.get_webview_window("main") {
+            if let (Some(x), Some(y)) = (data.settings.window_x, data.settings.window_y) {
+                let _ = window.set_position(tauri::Position::Physical(
+                    tauri::PhysicalPosition::new(x.round() as i32, y.round() as i32),
+                ));
+            }
+            if let (Some(width), Some(height)) =
+                (data.settings.window_width, data.settings.window_height)
+            {
+                let _ = window.set_size(tauri::Size::Physical(tauri::PhysicalSize::new(
+                    width.round() as u32,
+                    height.round() as u32,
+                )));
+            }
+        }
+    }
+
+    data.settings.window_x = None;
+    data.settings.window_y = None;
+    data.settings.window_width = None;
+    data.settings.window_height = None;
+    let _ = append_event(
+        app,
+        LogEvent {
+            level: "info".to_owned(),
+            operation: "window.geometry.migrate".to_owned(),
+            message: if plugin_has_state {
+                "旧窗口几何字段已清理（插件已有状态文件）".to_owned()
+            } else {
+                "旧窗口几何已迁移给 window-state 插件".to_owned()
+            },
+            request_id: None,
+            details: None,
+        },
+    );
+    true
 }
 
 #[tauri::command]

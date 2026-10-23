@@ -16,6 +16,15 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 use tauri::Position;
 #[cfg(desktop)]
 use tauri::WindowEvent;
+#[cfg(desktop)]
+use tauri_plugin_window_state::{AppHandleExt, StateFlags};
+
+/// 由 window-state 插件接管的窗口状态：位置 + 尺寸。
+///
+/// 刻意不恢复 `MAXIMIZED`：主窗口以 `visible: false` 启动，插件的 `maximize()`
+/// 会提前让窗口可见，破坏「数据加载完再显示」与「托盘隐藏时不弹出」的语义。
+#[cfg(desktop)]
+const WINDOW_STATE_FLAGS: StateFlags = StateFlags::POSITION.union(StateFlags::SIZE);
 
 #[tauri::command]
 fn window_visibility(app: tauri::AppHandle) -> Result<bool, String> {
@@ -42,7 +51,11 @@ fn set_window_visibility(
 }
 
 #[tauri::command]
-fn quit_application(app: tauri::AppHandle) { app.exit(0); }
+fn quit_application(app: tauri::AppHandle) {
+    #[cfg(desktop)]
+    let _ = app.save_window_state(WINDOW_STATE_FLAGS);
+    app.exit(0);
+}
 
 #[tauri::command]
 fn navigate_main_window(path: String, app: tauri::AppHandle) -> Result<(), String> {
@@ -112,6 +125,14 @@ pub fn run() {
         Some(vec!["--autostart"]),
     ));
     let app = app.plugin(tauri_plugin_fs::init());
+    // 窗口位置/尺寸持久化交给官方插件（状态文件在 app config dir 的 .window-state.json）。
+    #[cfg(desktop)]
+    let app = app.plugin(
+        tauri_plugin_window_state::Builder::default()
+            .with_state_flags(WINDOW_STATE_FLAGS)
+            .with_denylist(&["tray-menu"])
+            .build(),
+    );
     // single-instance 必须放在其它插件之后、build() 之前。
     #[cfg(desktop)]
     let app = app.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -155,6 +176,7 @@ pub fn run() {
                 let app_handle = app.handle().clone();
                 window.on_window_event(move |event| {
                     if matches!(event, WindowEvent::CloseRequested { .. }) {
+                        let _ = app_handle.save_window_state(WINDOW_STATE_FLAGS);
                         app_handle.exit(0);
                     }
                 });
@@ -187,6 +209,9 @@ pub fn run() {
     app.run(|app, event| {
         if matches!(event, tauri::RunEvent::Exit) {
             use tauri::Manager;
+            // 退出前再存一次窗口状态（正常路径上插件也会存，这里是兜底）。
+            #[cfg(desktop)]
+            let _ = app.save_window_state(WINDOW_STATE_FLAGS);
             // 退出兜底：Glycoprotein 节点停止或 WebView 清理若卡住，5 秒后强制结束进程，
             // 避免“关闭后仍有后台进程”进而让 single-instance 挡住下一次启动。
             std::thread::spawn(|| {
