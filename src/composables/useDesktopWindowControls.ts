@@ -1,4 +1,4 @@
-import { isTauri } from "@tauri-apps/api/core";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import { getCurrentWindow, type Window } from "@tauri-apps/api/window";
 import { onUnmounted, ref } from "vue";
 import { flushLogs, logError, logInfo } from "../services/logging";
@@ -146,6 +146,15 @@ export function useDesktopWindowControls() {
     unlistenMoved?.();
     await flushGeometrySave().catch(reportFailure);
     await flushLogs();
+    // 关闭窗口 = 退出应用。这里显式调用 quit_application（app.exit），
+    // 而不是只关闭窗口：tray-menu 是常驻隐藏窗口，只关窗口会让进程留在后台。
+    try {
+      await invoke("quit_application");
+      return;
+    } catch (error) {
+      logError("window.exit.failure", error);
+    }
+    // 兜底：命令不可用时退回关闭当前窗口（Rust 侧 CloseRequested 也会触发退出）。
     const closed = await runWindowAction("window.close", (window) => window.close());
     if (!closed) isClosing = false;
   }
