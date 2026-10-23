@@ -2,7 +2,6 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
@@ -27,7 +26,10 @@ pub(crate) fn install_panic_hook(app: &AppHandle) {
             .copied()
             .or_else(|| info.payload().downcast_ref::<String>().map(String::as_str))
             .unwrap_or("panic payload unavailable");
-        let location = "";
+        let location = info
+            .location()
+            .map(|location| format!(" [{}:{}]", location.file(), location.line()))
+            .unwrap_or_default();
         let _ = append_event(&app, LogEvent {
             level: "error".into(),
             operation: "rust.panic".into(),
@@ -179,7 +181,7 @@ fn rotate_logs(directory: &Path) -> Result<(), String> {
     result
 }
 
-fn timestamp() -> String { let duration = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default(); format!("{}.{:03}Z", duration.as_secs(), duration.subsec_millis()) }
+fn timestamp() -> String { chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true) }
 fn normalize_level(level: &str) -> String { match level.to_ascii_uppercase().as_str() { "DEBUG" => "DEBUG".into(), "WARN" | "WARNING" => "WARN".into(), "ERROR" => "ERROR".into(), _ => "INFO".into() } }
 fn limit_text(value: &str, max: usize) -> String { value.chars().take(max).collect() }
 

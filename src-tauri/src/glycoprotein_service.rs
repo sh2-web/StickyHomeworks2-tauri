@@ -37,6 +37,9 @@ pub(crate) struct WindowSettingsPatch {
 
 #[cfg(desktop)]
 mod desktop {
+    use std::sync::{LazyLock, Mutex as StdMutex};
+    use std::time::{Duration, Instant};
+
     use chrono::Local;
     use glycoprotein::{
         EventField, GlycoComplex, HandlerError, MethodField, PresenterEvent, UnixDomainMeshConnexon,
@@ -54,6 +57,40 @@ mod desktop {
     use super::{GlycoproteinStatus, WindowSettingsPatch, STATUS_EVENT, WINDOW_SETTINGS_EVENT};
 
     const HOMEWORK_CHANGED_EVENT_ID: &str = "homework.changed";
+
+    const NODE_START_RETRY_MIN_SECONDS: u64 = 30;
+    const NODE_START_RETRY_MAX_SECONDS: u64 = 60;
+
+    /// 最近一次成功应用的窗口属性，用于跳过完全相同的重复应用。
+    #[derive(Clone, Debug, PartialEq)]
+    struct AppliedWindowSettings {
+        visible: bool,
+        title: String,
+        always_on_bottom: bool,
+        window_topmost: bool,
+        window_x: Option<f64>,
+        window_y: Option<f64>,
+        window_width: Option<f64>,
+        window_height: Option<f64>,
+    }
+
+    impl AppliedWindowSettings {
+        fn from_settings(settings: &AppSettings) -> Self {
+            Self {
+                visible: settings.window_visible,
+                title: settings.title.clone(),
+                always_on_bottom: settings.always_on_bottom,
+                window_topmost: settings.window_topmost,
+                window_x: settings.window_x,
+                window_y: settings.window_y,
+                window_width: settings.window_width,
+                window_height: settings.window_height,
+            }
+        }
+    }
+
+    static LAST_APPLIED: LazyLock<StdMutex<Option<AppliedWindowSettings>>> =
+        LazyLock::new(|| StdMutex::new(None));
 
     #[derive(Debug, Serialize, JsonSchema)]
     #[serde(rename_all = "PascalCase")]
@@ -126,6 +163,10 @@ mod desktop {
         enabled: bool,
         node_id: String,
         last_error: Option<String>,
+        /// 上次启动失败的 node id 与退避截止时间，避免每次 autosave 都重试。
+        failed_node_id: String,
+        start_failure_count: u32,
+        retry_not_before: Option<Instant>,
     }
 
     pub(crate) struct GlycoproteinService {
@@ -155,6 +196,7 @@ mod desktop {
                 let was_running = state.node.is_some();
                 stop_node(app, &mut state).await;
                 state.last_error = None;
+                clear_start_backoff(&mut state);
                 let status = status_from_state(&state);
                 drop(state);
                 emit_status(app, &status);
@@ -176,6 +218,18 @@ mod desktop {
                 .is_some_and(|node| node.id() == settings.glycoprotein_node_id && node.is_started())
             {
                 state.last_error = None;
+                clear_start_backoff(&mut state);
+                let status = status_from_state(&state);
+                drop(state);
+                emit_status(app, &status);
+                return status;
+            }
+
+            if !was_enabled {
+                // 设置从关闭变为开启时立即重试，不等待退避窗口。
+                clear_start_backoff(&mut state);
+            }
+            if start_backoff_active(&state, &settings.glycoprotein_node_id) {
                 let status = status_from_state(&state);
                 drop(state);
                 emit_status(app, &status);
@@ -191,6 +245,7 @@ mod desktop {
                             Some(spawn_presenter_logger(app.clone(), presenter_events));
                         state.node = Some(node);
                         state.last_error = None;
+                        clear_start_backoff(&mut state);
                         log(
                             app,
                             "info",
@@ -201,22 +256,28 @@ mod desktop {
                     }
                     Err(error) => {
                         state.last_error = Some(error.to_string());
+                        let retry_seconds =
+                            schedule_start_retry(&mut state, &settings.glycoprotein_node_id);
                         log(
                             app,
-                            "error",
+                            "warn",
                             "glycoprotein.start",
-                            &format!("启动 Glycoprotein 节点失败：{error}"),
+                            &format!(
+                                "启动 Glycoprotein 节点失败，{retry_seconds} 秒后重试：{error}"
+                            ),
                             Some(json!({ "nodeId": settings.glycoprotein_node_id })),
                         );
                     }
                 },
                 Err(error) => {
                     state.last_error = Some(error.clone());
+                    let retry_seconds =
+                        schedule_start_retry(&mut state, &settings.glycoprotein_node_id);
                     log(
                         app,
                         "error",
                         "glycoprotein.build",
-                        &format!("创建 Glycoprotein 节点失败：{error}"),
+                        &format!("创建 Glycoprotein 节点失败，{retry_seconds} 秒后重试：{error}"),
                         Some(json!({ "nodeId": settings.glycoprotein_node_id })),
                     );
                 }
@@ -272,8 +333,16 @@ mod desktop {
     pub(crate) fn apply_window_settings(
         app: &AppHandle,
         settings: &AppSettings,
-        _allow_hidden: bool,
     ) -> Result<(), String> {
+        let desired = AppliedWindowSettings::from_settings(settings);
+        let already_applied = LAST_APPLIED
+            .lock()
+            .map(|cache| cache.as_ref() == Some(&desired))
+            .unwrap_or(false);
+        if already_applied {
+            return Ok(());
+        }
+
         let window = main_window(app).map_err(|error| error.to_string())?;
         let mut errors = Vec::new();
         let should_show = settings.window_visible;
@@ -317,6 +386,9 @@ mod desktop {
         }
 
         if errors.is_empty() {
+            if let Ok(mut cache) = LAST_APPLIED.lock() {
+                *cache = Some(desired);
+            }
             Ok(())
         } else {
             Err(errors.join("; "))
@@ -331,6 +403,38 @@ mod desktop {
         if let Err(error) = result {
             errors.push(format!("{operation}: {error}"));
         }
+    }
+
+    /// 清除节点启动失败的退避窗口（node id 变化、显式关闭/开启或启动成功时调用）。
+    fn clear_start_backoff(state: &mut ServiceState) {
+        state.failed_node_id.clear();
+        state.start_failure_count = 0;
+        state.retry_not_before = None;
+    }
+
+    /// 同一 node id 仍在退避窗口内时跳过本次启动尝试。
+    fn start_backoff_active(state: &ServiceState, node_id: &str) -> bool {
+        state.retry_not_before.is_some_and(|deadline| {
+            state.failed_node_id == node_id && Instant::now() < deadline
+        })
+    }
+
+    /// 记录一次启动失败并返回本次退避秒数：30 秒起，同 node id 连续失败指数退避至 60 秒。
+    fn schedule_start_retry(state: &mut ServiceState, node_id: &str) -> u64 {
+        let failures = if state.failed_node_id == node_id {
+            state.start_failure_count.saturating_add(1)
+        } else {
+            1
+        };
+        let seconds = if failures > 1 {
+            NODE_START_RETRY_MAX_SECONDS
+        } else {
+            NODE_START_RETRY_MIN_SECONDS
+        };
+        state.failed_node_id = node_id.to_owned();
+        state.start_failure_count = failures;
+        state.retry_not_before = Some(Instant::now() + Duration::from_secs(seconds));
+        seconds
     }
 
     async fn stop_node(app: &AppHandle, state: &mut ServiceState) {
@@ -837,6 +941,35 @@ mod desktop {
         }
 
         #[test]
+        fn node_start_failures_back_off_per_node_id() {
+            let mut state = ServiceState::default();
+            assert!(!start_backoff_active(&state, "stickyHomeworks-test"));
+
+            assert_eq!(schedule_start_retry(&mut state, "stickyHomeworks-test"), 30);
+            assert!(start_backoff_active(&state, "stickyHomeworks-test"));
+            assert!(!start_backoff_active(&state, "stickyHomeworks-other"));
+
+            assert_eq!(schedule_start_retry(&mut state, "stickyHomeworks-test"), 60);
+            clear_start_backoff(&mut state);
+            assert!(!start_backoff_active(&state, "stickyHomeworks-test"));
+        }
+
+        #[test]
+        fn applied_window_settings_ignore_unrelated_fields() {
+            let settings = AppSettings {
+                title: "作业".to_owned(),
+                ..AppSettings::default()
+            };
+            let mut unrelated_change = settings.clone();
+            unrelated_change.subjects = vec!["数学".to_owned()];
+
+            assert_eq!(
+                AppliedWindowSettings::from_settings(&settings),
+                AppliedWindowSettings::from_settings(&unrelated_change)
+            );
+        }
+
+        #[test]
         fn crates_io_transport_rejects_unsafe_node_ids() {
             assert!(GlycoComplex::builder("bad/node").build().is_err());
             assert!(GlycoComplex::builder("stickyHomeworks-test")
@@ -903,7 +1036,6 @@ mod mobile {
     pub(crate) fn apply_window_settings(
         _app: &AppHandle,
         _settings: &AppSettings,
-        _allow_hidden: bool,
     ) -> Result<(), String> {
         Ok(())
     }

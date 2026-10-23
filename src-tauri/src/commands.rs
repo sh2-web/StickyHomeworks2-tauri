@@ -1,5 +1,10 @@
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine as _;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use serde::Serialize;
@@ -45,8 +50,10 @@ pub(crate) fn load_app_data(
         .map_err(|error| record_error(&app, "app-data.load", error, request_id.clone()))?;
     let path = app_state_path(&app)
         .map_err(|error| record_error(&app, "app-data.path", error, request_id.clone()))?;
-    write_app_data(&path, &mut data)
-        .map_err(|error| record_error(&app, "app-data.normalize", error, request_id.clone()))?;
+    // 写回归一化结果只是 best-effort：写失败不影响本次已读到的数据。
+    if let Err(error) = write_app_data(&path, &mut data) {
+        let _ = record_error(&app, "app-data.normalize", error, request_id.clone());
+    }
     record_info(&app, "app-data.load", "应用数据加载完成", request_id);
     Ok(data)
 }
@@ -57,13 +64,75 @@ fn load_current_app_data(app: &AppHandle) -> Result<AppData, String> {
         return Ok(AppData::default());
     }
 
-    read_persisted_app_data(&path)
+    match read_persisted_app_data(&path) {
+        Ok(data) => Ok(data),
+        Err(error) => recover_corrupted_app_data(app, &path, &error),
+    }
+}
+
+/// 文件损坏时把原文件改名备份，记录 error 日志并回落到默认数据。
+///
+/// **只在整个恢复动作成功时**才回落默认值：如果备份（rename）失败，说明更可能是
+/// 暂时性 IO 问题（文件被占用、权限不足），此时必须把原始错误抛给调用方，
+/// 绝不能用一个空的默认值覆盖用户真实数据。
+fn recover_corrupted_app_data(
+    app: &AppHandle,
+    path: &Path,
+    error: &str,
+) -> Result<AppData, String> {
+    let (data, backup) = recover_corrupted_app_data_files(path);
+    let message = match &backup {
+        Ok(name) => format!("应用数据损坏，已备份为 {name} 并回落到默认值：{error}"),
+        Err(backup_error) => format!(
+            "应用数据损坏但备份失败（{backup_error}），保持原文件不动：{error}"
+        ),
+    };
+    let _ = append_event(
+        app,
+        LogEvent {
+            level: "error".to_owned(),
+            operation: "app-data.recovery".to_owned(),
+            message: message.clone(),
+            request_id: None,
+            details: None,
+        },
+    );
+    match backup {
+        Ok(_) => Ok(data),
+        Err(_) => Err(message),
+    }
+}
+
+/// 可单测的恢复动作：返回默认数据与备份文件路径（`app-state.corrupt-<unix秒>.json`）。
+fn recover_corrupted_app_data_files(path: &Path) -> (AppData, Result<String, String>) {
+    (AppData::default(), backup_corrupted_app_data(path))
+}
+
+fn backup_corrupted_app_data(path: &Path) -> Result<String, String> {
+    let directory = path.parent().ok_or("应用数据路径没有父目录")?;
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default();
+    let stem = APP_STATE_FILE.strip_suffix(".json").unwrap_or(APP_STATE_FILE);
+    let backup = directory.join(format!("{stem}.corrupt-{seconds}.json"));
+    fs::rename(path, &backup).map_err(|error| error.to_string())?;
+    Ok(backup.to_string_lossy().into_owned())
 }
 pub(crate) fn persisted_window_visibility(app: &AppHandle) -> Result<bool, String> {
     Ok(load_current_app_data(app)?.settings.window_visible)
 }
 
-pub(crate) fn set_persisted_window_visibility(app: &AppHandle, visible: bool) -> Result<(), String> {
+pub(crate) fn set_persisted_window_visibility(
+    app: &AppHandle,
+    coordinator: &AppDataCoordinator,
+    visible: bool,
+) -> Result<(), String> {
+    // 与 save_app_data 共用同一把锁，避免整文件覆盖竞态。
+    let _guard = coordinator
+        .operation
+        .lock()
+        .map_err(|error| error.to_string())?;
     let mut data = load_current_app_data(app)?;
     data.settings.window_visible = visible;
     let path = app_state_path(app)?;
@@ -235,7 +304,7 @@ pub(crate) fn export_diagnostic_bundle(
     disclosure: Option<DiagnosticDisclosure>,
     app_data: Option<AppData>,
     request_id: Option<String>,
-) -> Result<Vec<u8>, String> {
+) -> Result<String, String> {
     let bundle = crate::diagnostics::diagnostic_bundle(
         &app,
         environment,
@@ -244,7 +313,8 @@ pub(crate) fn export_diagnostic_bundle(
     )
     .map_err(|error| record_error(&app, "diagnostic-bundle.build", error, request_id.clone()))?;
     record_info(&app, "diagnostic-bundle.build", "诊断包已生成", request_id);
-    Ok(bundle)
+    // 接口约定：返回标准 Base64 字符串，前端用 atob 解码。
+    Ok(STANDARD.encode(&bundle))
 }
 
 #[tauri::command]
@@ -306,7 +376,7 @@ async fn synchronize_runtime(
         );
     }
 
-    if let Err(error) = apply_window_settings(app, &data.settings, status.running || !status.enabled) {
+    if let Err(error) = apply_window_settings(app, &data.settings) {
         let _ = record_error(app, "window.settings.apply", error, request_id);
     }
     Ok((data, status))
@@ -349,4 +419,36 @@ fn app_state_path(app: &AppHandle) -> Result<PathBuf, String> {
         .app_data_dir()
         .map_err(|error| error.to_string())?;
     Ok(data_dir.join(APP_STATE_FILE))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::recover_corrupted_app_data_files;
+    use crate::data::AppData;
+    use std::fs;
+    use uuid::Uuid;
+
+    #[test]
+    fn corrupted_app_data_is_backed_up_and_falls_back_to_default() {
+        let directory =
+            std::env::temp_dir().join(format!("stickyhomeworks2-recovery-{}", Uuid::new_v4()));
+        fs::create_dir_all(&directory).expect("temp directory should be created");
+        let path = directory.join("app-state.json");
+        fs::write(&path, b"{ not a valid app state").expect("corrupted fixture should be written");
+
+        let (data, backup) = recover_corrupted_app_data_files(&path);
+
+        assert_eq!(data, AppData::default());
+        let backup = backup.expect("损坏文件应被备份");
+        let backup_name = std::path::Path::new(&backup)
+            .file_name()
+            .expect("backup should have a file name")
+            .to_string_lossy()
+            .into_owned();
+        assert!(backup_name.starts_with("app-state.corrupt-"));
+        assert!(backup_name.ends_with(".json"));
+        assert!(!path.exists());
+        assert!(std::path::Path::new(&backup).exists());
+        fs::remove_dir_all(directory).expect("temp directory should be removed");
+    }
 }

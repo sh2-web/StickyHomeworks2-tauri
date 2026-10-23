@@ -7,7 +7,7 @@ mod legacy_import;
 mod logger;
 mod persistence;
 mod platform;
-use tauri::{Emitter, Manager};
+use tauri::{Emitter, Manager, State};
 #[cfg(desktop)]
 use tauri::WebviewWindowBuilder;
 #[cfg(desktop)]
@@ -22,13 +22,20 @@ fn window_visibility(app: tauri::AppHandle) -> Result<bool, String> {
     commands::persisted_window_visibility(&app)
 }
 #[tauri::command]
-fn show_main_window(app: tauri::AppHandle) -> Result<(), String> {
-    set_window_visibility(true, app)
+fn show_main_window(
+    app: tauri::AppHandle,
+    coordinator: State<'_, commands::AppDataCoordinator>,
+) -> Result<(), String> {
+    set_window_visibility(true, app, coordinator)
 }
 
 #[tauri::command]
-fn set_window_visibility(visible: bool, app: tauri::AppHandle) -> Result<(), String> {
-    commands::set_persisted_window_visibility(&app, visible)?;
+fn set_window_visibility(
+    visible: bool,
+    app: tauri::AppHandle,
+    coordinator: State<'_, commands::AppDataCoordinator>,
+) -> Result<(), String> {
+    commands::set_persisted_window_visibility(&app, coordinator.inner(), visible)?;
     let window = app.get_webview_window("main").ok_or_else(|| "主窗口不存在".to_owned())?;
     (if visible { window.show() } else { window.hide() })
         .map_err(|error| error.to_string())
@@ -95,19 +102,25 @@ fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let mut app = tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init());
     #[cfg(desktop)]
-    {
-        app = app.plugin(tauri_plugin_autostart::init(
-            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
-            Some(vec!["--autostart"]),
-        ));
-    }
+    let app = app.plugin(tauri_plugin_autostart::init(
+        tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+        Some(vec!["--autostart"]),
+    ));
+    let app = app.plugin(tauri_plugin_fs::init());
+    // single-instance 必须放在其它插件之后、build() 之前。
+    #[cfg(desktop)]
+    let app = app.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+        if let Some(window) = app.get_webview_window("main") {
+            let _ = window.show();
+            let _ = window.set_focus();
+        }
+    }));
     let app = app
-        .plugin(tauri_plugin_fs::init())
         .manage(commands::AppDataCoordinator::default())
         .manage(glycoprotein_service::GlycoproteinService::default())
         .setup(|app| {
@@ -127,6 +140,7 @@ pub fn run() {
             quit_application,
             platform::clipboard_workaround_required,
             platform::webkitgtk_dialog_exit_workaround_required,
+            platform::runtime_layout,
             commands::load_app_data,
             commands::save_app_data,
             commands::import_legacy_data_contents,

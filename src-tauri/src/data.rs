@@ -50,12 +50,23 @@ where
 {
     let value = Value::deserialize(deserializer)?;
     if let Value::String(text) = value {
-        if text.trim_start().starts_with("<FlowDocument") {
+        if is_legacy_flow_document_xaml(&text) {
             return Ok(HomeworkContent::LegacyFlowDocumentXaml { xaml: text });
         }
         return Ok(HomeworkContent::PlainText { text });
     }
     serde_json::from_value(value).map_err(serde::de::Error::custom)
+}
+
+/// 与前端判定对齐：去除前导空白后以 `<FlowDocument` 开头，且其后紧跟空白、`>` 或字符串结束。
+fn is_legacy_flow_document_xaml(text: &str) -> bool {
+    let Some(remaining) = text.trim_start().strip_prefix("<FlowDocument") else {
+        return false;
+    };
+    match remaining.chars().next() {
+        None => true,
+        Some(character) => character.is_whitespace() || character == '>',
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -293,10 +304,6 @@ fn normalize_panel_width(value: f64) -> f64 {
     (value.clamp(160.0, 2000.0) / 10.0).round() * 10.0
 }
 
-#[cfg(all(test, feature = "local-tests"))]
-#[path = "local_tests/data.rs"]
-mod local_tests;
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -360,5 +367,45 @@ mod tests {
         assert!(settings.window_topmost);
         assert_eq!(settings.window_x, Some(10.0));
         assert_eq!(settings.window_height, Some(400.0));
+    }
+
+    #[test]
+    fn maps_legacy_plain_text_and_flowdocument_content() {
+        let plain_text: HomeworkRecord =
+            serde_json::from_value(json!({ "Content": "  普通作业内容" }))
+                .expect("legacy plain text should deserialize");
+        assert_eq!(
+            plain_text.content,
+            HomeworkContent::PlainText {
+                text: "  普通作业内容".to_owned()
+            }
+        );
+
+        let flow_document: HomeworkRecord = serde_json::from_value(json!({
+            "Content": "  <FlowDocument xmlns=\"http://schemas.microsoft.com/winfx/2006/xaml/presentation\"><Paragraph>内容</Paragraph></FlowDocument>"
+        }))
+        .expect("legacy FlowDocument content should deserialize");
+        assert!(matches!(
+            flow_document.content,
+            HomeworkContent::LegacyFlowDocumentXaml { .. }
+        ));
+
+        let bare_flow_document: HomeworkRecord =
+            serde_json::from_value(json!({ "Content": "<FlowDocument>" }))
+                .expect("bare FlowDocument tag should deserialize");
+        assert!(matches!(
+            bare_flow_document.content,
+            HomeworkContent::LegacyFlowDocumentXaml { .. }
+        ));
+
+        let lookalike: HomeworkRecord =
+            serde_json::from_value(json!({ "Content": "<FlowDocumentFoo>" }))
+                .expect("lookalike tag should deserialize");
+        assert_eq!(
+            lookalike.content,
+            HomeworkContent::PlainText {
+                text: "<FlowDocumentFoo>".to_owned()
+            }
+        );
     }
 }

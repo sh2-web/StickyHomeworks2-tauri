@@ -99,9 +99,28 @@ fn read_legacy_settings_source(source: &str) -> Result<AppSettings, String> {
     }
     if let Some(value) = object
         .get("Autooutwork")
+        .or_else(|| object.get("AutoOutwork"))
         .and_then(serde_json::Value::as_bool)
     {
         settings.auto_outwork = value;
+    }
+    if let Some(value) = object
+        .get("AutoStart")
+        .and_then(serde_json::Value::as_bool)
+    {
+        settings.auto_start = value;
+    }
+    if let Some(value) = object
+        .get("BackgroundOpacity")
+        .and_then(serde_json::Value::as_f64)
+    {
+        settings.background_opacity = value;
+    }
+    if let Some(value) = object
+        .get("HomeworkScale")
+        .and_then(serde_json::Value::as_f64)
+    {
+        settings.homework_scale = value;
     }
     if let Some(value) = object
         .get("DelayedCleanupEnabled")
@@ -196,10 +215,6 @@ fn string_array(value: &serde_json::Value) -> Option<Vec<String>> {
     })
 }
 
-#[cfg(all(test, feature = "local-tests"))]
-#[path = "local_tests/legacy_import.rs"]
-mod local_tests;
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -233,5 +248,38 @@ mod tests {
         assert_eq!(settings.window_y, Some(203.0));
         assert_eq!(settings.window_width, Some(500.0));
         assert_eq!(settings.window_height, Some(701.0));
+    }
+
+    #[test]
+    fn imports_auto_start_opacity_and_scale_from_legacy_settings() {
+        let result = import_legacy_data_from_sources(
+            AppData::default(),
+            None,
+            r#"{
+                "AutoStart": true,
+                "BackgroundOpacity": 64.4,
+                "HomeworkScale": 120,
+                "AutoOutwork": false
+            }"#,
+        )
+        .expect("legacy auto start and presentation settings should import");
+
+        let settings = result.data.settings;
+        assert!(settings.auto_start);
+        assert_eq!(settings.background_opacity, 64.0);
+        assert_eq!(settings.homework_scale, 120.0);
+        assert!(!settings.auto_outwork);
+    }
+
+    #[test]
+    fn legacy_autooutwork_key_spelling_is_still_supported() {
+        let result = import_legacy_data_from_sources(
+            AppData::default(),
+            None,
+            r#"{ "Autooutwork": false }"#,
+        )
+        .expect("legacy Autooutwork key should import");
+
+        assert!(!result.data.settings.auto_outwork);
     }
 }
