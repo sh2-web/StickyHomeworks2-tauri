@@ -4,7 +4,9 @@ import { EditorContent } from "@tiptap/vue-3";
 import type { Selection } from "@tiptap/pm/state";
 import { clampHomeworkImageWidthPercent, createHomeworkEditor, findHomeworkImagePosition, insertHomeworkImage, insertHomeworkLink, loadHomeworkEditor, updateHomeworkImageWidthPercent } from "../composables/homeworkEditorDocument";
 import { hideWebKitGtkDialog, useWebKitGtkDialogExit } from "../composables/useWebKitGtkDialogExit";
+import { useRangeSliderDrag } from "../composables/useRangeSliderDrag";
 import { toDateInputValue } from "../domain/homework";
+import { prepareM3eDialog } from "../m3e-internals";
 import type { HomeworkRecord } from "../types/app-data";
 import { serializeHomeworkContent, type HomeworkContent } from "../types/homework-content";
 import ExternalLinkConfirmDialog from "./ExternalLinkConfirmDialog.vue";
@@ -40,35 +42,20 @@ const imageInput = ref<HTMLInputElement | null>(null);
 const imageSlider = ref<HTMLElement | null>(null);
 const imageSliderThumb = ref<(HTMLElement & { value?: string }) | null>(null);
 
-function setImageSliderFromPointer(event: PointerEvent): void {
-  const slider = imageSlider.value;
+function applyImageSliderWidth(value: number): void {
   const thumb = imageSliderThumb.value;
-  if (!slider || !thumb || !selectedImage.value) return;
-  const rect = slider.getBoundingClientRect();
-  const ratio = Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width));
-  const value = Math.round(10 + ratio * 90);
+  if (!thumb || !selectedImage.value) return;
   thumb.value = String(value);
   thumb.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
-function beginImageSliderPointer(event: PointerEvent): void {
-  if (event.button !== 0) return;
-  const slider = imageSlider.value;
-  if (!slider) return;
-  event.preventDefault();
-  slider.setPointerCapture(event.pointerId);
-  setImageSliderFromPointer(event);
-  slider.addEventListener("pointermove", setImageSliderFromPointer as EventListener);
-  slider.addEventListener("pointerup", endImageSliderPointer as EventListener, { once: true });
-  slider.addEventListener("pointercancel", endImageSliderPointer as EventListener, { once: true });
-}
-
-function endImageSliderPointer(event: PointerEvent): void {
-  const slider = imageSlider.value;
-  if (!slider) return;
-  slider.removeEventListener("pointermove", setImageSliderFromPointer as EventListener);
-  if (slider.hasPointerCapture(event.pointerId)) slider.releasePointerCapture(event.pointerId);
-}
+const imageSliderDrag = useRangeSliderDrag({
+  slider: () => imageSlider.value,
+  resolveValue: (event, rect) =>
+    Math.round(10 + Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width)) * 90),
+  onPreview: applyImageSliderWidth,
+  onCommit: applyImageSliderWidth,
+});
 const linkUrl = ref("");
 const linkDisplayText = ref("");
 const linkSelection = ref<Selection | null>(null);
@@ -165,8 +152,7 @@ watch(() => props.homework?.id, (id) => {
 }, { immediate: true });
 useWebKitGtkDialogExit(dialog);
 useWebKitGtkDialogExit(linkDialog);
-function prepareDialog() { const root = dialog.value?.shadowRoot; const base = root?.querySelector<HTMLDialogElement>(".base"); const content = root?.querySelector<HTMLElement>(".content"); if (!base || !content) return; base.style.maxHeight = "calc(100dvh - 2rem)"; content.style.flex = "1 1 auto"; content.style.minHeight = "0"; content.style.overflow = "auto"; }
-function show() { void nextTick(() => { if (props.homework && dueDatePicker.value) dueDatePicker.value.date = new Date(`${toDateInputValue(props.homework.dueTime)}T00:00:00`); void Promise.resolve(dialog.value?.show()).then(prepareDialog); }); }
+function show() { void nextTick(() => { if (props.homework && dueDatePicker.value) dueDatePicker.value.date = new Date(`${toDateInputValue(props.homework.dueTime)}T00:00:00`); void Promise.resolve(dialog.value?.show()).then(() => prepareM3eDialog(dialog.value)); }); }
 async function hide() { await hideWebKitGtkDialog(dialog.value); }
 function updateDueDate(event: Event) { const date = (event.currentTarget as DatepickerElement).date; if (date) emit("update:dueDate", date); }
 function updateSubject(event: Event) { const value = (event.currentTarget as SelectElement).value; if (typeof value === "string") emit("update:subject", value); }
@@ -196,7 +182,7 @@ defineExpose({ show, hide });
             <input ref="imageInput" type="file" accept="image/png,image/jpeg,image/gif,image/webp" hidden @change="updateImage" />
           </m3e-toolbar>
           <div v-else key="image" class="homework-editor-image-tools" aria-label="图片尺寸工具">
-            <m3e-slider ref="imageSlider" min="10" max="100" step="1" labelled @pointerdown="beginImageSliderPointer">
+            <m3e-slider ref="imageSlider" min="10" max="100" step="1" labelled @pointerdown="imageSliderDrag.onPointerDown">
               <m3e-slider-thumb ref="imageSliderThumb" :value="String(selectedImage?.widthPercent ?? 100)" aria-label="图片宽度百分比" @input="updateSelectedImageWidth"></m3e-slider-thumb>
             </m3e-slider>
             <div class="homework-editor-image-actions-row">

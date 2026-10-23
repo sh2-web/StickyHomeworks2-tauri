@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { nextTick, ref } from "vue";
+import { M3eSnackbar } from "@m3e/web/all";
 import { hideWebKitGtkDialog, useWebKitGtkDialogExit } from "../composables/useWebKitGtkDialogExit";
+import { prepareM3eDialog } from "../m3e-internals";
 import {
   createHomeworkExportFilename,
   exportHomeworkImage,
@@ -34,15 +36,11 @@ const layoutOptions = [
 
 useWebKitGtkDialogExit(dialog);
 
-function prepareDialog() {
-  const root = dialog.value?.shadowRoot;
-  const base = root?.querySelector<HTMLDialogElement>(".base");
-  const content = root?.querySelector<HTMLElement>(".content");
-  if (!base || !content) return;
-  base.style.maxHeight = "calc(100dvh - 2rem)";
-  content.style.flex = "1 1 auto";
-  content.style.minHeight = "0";
-  content.style.overflow = "auto";
+/** 导出渲染期间不读实时数据，优先用 structuredClone，缺失时回退 JSON 序列化。 */
+function cloneGroups(groups: SubjectGroup[]): SubjectGroup[] {
+  return typeof structuredClone === "function"
+    ? structuredClone(groups)
+    : JSON.parse(JSON.stringify(groups)) as SubjectGroup[];
 }
 
 function show() {
@@ -50,7 +48,7 @@ function show() {
   pixelRatio.value = 2;
   if (!props.groups.length) M3eSnackbar.open("没有可导出的作业。");
   void nextTick(() => {
-    void Promise.resolve(dialog.value?.show()).then(prepareDialog);
+    void Promise.resolve(dialog.value?.show()).then(() => prepareM3eDialog(dialog.value));
   });
 }
 
@@ -88,7 +86,7 @@ async function exportImage() {
     M3eSnackbar.open("准备中");
     await nextTick();
     M3eSnackbar.open("渲染中");
-    const exportGroups = JSON.parse(JSON.stringify(props.groups)) as SubjectGroup[];
+    const exportGroups = cloneGroups(props.groups);
     const result = await exportHomeworkImage({
       layout: layout.value,
       pixelRatio: pixelRatio.value,

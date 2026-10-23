@@ -360,6 +360,10 @@
   line-height: 1.35;
 }
 
+.settings-control-list__item > .settings-control-list__hint {
+  color: var(--md-sys-color-error);
+}
+
 .settings-control-list__item > [slot="trailing"] {
   flex: 0 0 auto;
   align-self: center;

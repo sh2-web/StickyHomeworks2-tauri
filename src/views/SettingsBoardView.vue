@@ -1,16 +1,42 @@
 <script setup lang="ts">
+import { ref } from "vue";
 import { useSettingsAutosave } from "../composables/useSettingsAutosave";
 import SettingsPage from "../components/SettingsPage.vue";
 import { logInfo } from "../services/logging";
 
 const { appData, save, settingsError } = useSettingsAutosave();
+const PANEL_WIDTH_MIN = 160;
+const PANEL_WIDTH_MAX = 2000;
+const PANEL_WIDTH_STEP = 10;
+const PANEL_WIDTH_HINT = "区间160~2000，须为10的倍数。";
+const panelWidthHint = ref("");
+
+/** 与 normalizeSettings 的 maxPanelWidth 归一化保持一致。 */
+function normalizePanelWidth(value: number): number {
+  return Math.round(Math.max(PANEL_WIDTH_MIN, Math.min(PANEL_WIDTH_MAX, value)) / PANEL_WIDTH_STEP) * PANEL_WIDTH_STEP;
+}
 
 function updatePanelWidth(event: Event) {
-  const width = Number((event.currentTarget as HTMLInputElement).value);
-  if (Number.isFinite(width)) {
-    logInfo("settings.panel.width.change", "看板最大宽度已修改");
-    void save({ maxPanelWidth: width });
+  const input = event.currentTarget as HTMLInputElement;
+  const raw = Number(input.value);
+  if (!input.value.trim() || !Number.isFinite(raw)) {
+    input.value = String(appData.value.settings.maxPanelWidth);
+    panelWidthHint.value = "请输入 160–2000 之间的数值";
+    return;
   }
+  const width = normalizePanelWidth(raw);
+  if (width !== raw) {
+    // 归一化结果写回输入框：:value 单向绑定时越界值会被静默修正却仍显示旧值。
+    input.value = String(width);
+    panelWidthHint.value =
+      raw < PANEL_WIDTH_MIN || raw > PANEL_WIDTH_MAX
+        ? "已调整为 160–2000 之间的值"
+        : "已调整为 10 的倍数";
+  } else {
+    panelWidthHint.value = "";
+  }
+  logInfo("settings.panel.width.change", "看板最大宽度已修改");
+  void save({ maxPanelWidth: width });
 }
 </script>
 
@@ -19,7 +45,7 @@ function updatePanelWidth(event: Event) {
     <m3e-list class="settings-control-list">
       <m3e-list-item class="settings-control-list__item">
         最大面板宽度
-        <span slot="supporting-text">区间160~2000，须为10的倍数。</span>
+        <span slot="supporting-text" aria-live="polite" :class="{ 'settings-control-list__hint': panelWidthHint }">{{ panelWidthHint || PANEL_WIDTH_HINT }}</span>
         <m3e-form-field slot="trailing" variant="outlined" hide-subscript="always">
           <input id="settings-panel-width" aria-label="最大面板宽度" type="number" placeholder="0" min="160" max="2000" step="10" :value="appData.settings.maxPanelWidth" @change="updatePanelWidth" />
           <span slot="suffix">px</span>

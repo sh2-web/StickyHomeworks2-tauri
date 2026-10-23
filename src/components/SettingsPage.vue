@@ -4,19 +4,9 @@ import { useRoute, useRouter } from "vue-router";
 import "../styles/settings-view.css";
 import { useAppContext } from "../app-context";
 import { getSettingsSidebarScrollTop, setSettingsSidebarScrollTop } from "../services/settings-sidebar-scroll";
+import { visibleSettingsSections } from "../settings/sections";
+import { MOBILE_LAYOUT_MAX_WIDTH, SPLIT_LAYOUT_MIN_WIDTH, isAtLeast, isBelow } from "../ui/breakpoints";
 
-const RIGHT_PANEL_MIN_WIDTH = 950;
-const SPLIT_LAYOUT_MIN_WIDTH = 700;
-const settingsSections = [
-  { path: "/settings/general", icon: "tune", title: "通用", detail: "应用标题" },
-  { path: "/settings/vocabulary", icon: "category", title: "作业词库", detail: "科目和标签" },
-  { path: "/settings/expiry", icon: "event_busy", title: "过期作业", detail: "清理和标记" },
-  { path: "/settings/board", icon: "view_column", title: "看板", detail: "最大面板宽度" },
-  { path: "/settings/glycoprotein", icon: "hub", title: "Glycoprotein", detail: "本机节点与窗口控制", desktopOnly: true },
-  { path: "/settings/import", icon: "upload_file", title: "导入旧版数据", detail: "Profile.json 和 Settings.json" },
-  { path: "/settings/diagnostics", icon: "content_copy", title: "诊断信息", detail: "反馈、诊断包与运行日志" },
-  { path: "/settings/about", icon: "info", title: "关于", detail: "版本、项目与许可证" },
-];
 const { title, headingId, error, showBack } = defineProps<{
   title: string;
   headingId: string;
@@ -28,21 +18,21 @@ const route = useRoute();
 const { isMobileRuntime } = useAppContext();
 const viewportWidth = ref(0);
 const navigationList = ref<HTMLElement | null>(null);
-const visibleSettingsSections = computed(() =>
-  settingsSections.filter((section) => !section.desktopOnly || !isMobileRuntime.value),
-);
+const visibleSections = computed(() => visibleSettingsSections(isMobileRuntime.value));
 
 
 const isNarrowSplitLayout = computed(() =>
-  !isMobileRuntime.value && viewportWidth.value > 0 && viewportWidth.value < SPLIT_LAYOUT_MIN_WIDTH,
+  !isMobileRuntime.value && isBelow(viewportWidth.value, SPLIT_LAYOUT_MIN_WIDTH),
 );
 
 const isRightPanelInsufficient = computed(() =>
-  !isMobileRuntime.value && viewportWidth.value >= SPLIT_LAYOUT_MIN_WIDTH && viewportWidth.value < RIGHT_PANEL_MIN_WIDTH,
+  !isMobileRuntime.value
+  && isAtLeast(viewportWidth.value, SPLIT_LAYOUT_MIN_WIDTH)
+  && isBelow(viewportWidth.value, MOBILE_LAYOUT_MAX_WIDTH),
 );
 
 const isMobileNarrowLayout = computed(() =>
-  isMobileRuntime.value && viewportWidth.value > 0 && viewportWidth.value < RIGHT_PANEL_MIN_WIDTH,
+  isMobileRuntime.value && isBelow(viewportWidth.value, MOBILE_LAYOUT_MAX_WIDTH),
 );
 
 
@@ -91,7 +81,7 @@ onUnmounted(() => {
         <m3e-heading variant="title" size="large" level="2">设置</m3e-heading>
         <m3e-action-list variant="segmented" class="settings-navigation__list" @click.capture="saveNavigationScrollPosition">
           <m3e-list-action
-            v-for="section in visibleSettingsSections"
+            v-for="section in visibleSections"
             :key="section.path"
             class="settings-navigation__item"
             :class="{ 'settings-navigation__item--active': route.path === section.path }"

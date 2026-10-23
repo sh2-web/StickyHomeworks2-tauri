@@ -230,17 +230,6 @@
   opacity: 0;
 }
 
-.route-static-enter-active,
-.route-static-leave-active {
-  transition: none;
-}
-
-.route-static-enter-from,
-.route-static-leave-to {
-  opacity: 1;
-  transform: none;
-}
-
 @media (prefers-reduced-motion: reduce) {
   .settings-forward-enter-active,
   .settings-forward-leave-active,
@@ -500,13 +489,6 @@
   background: var(--md-sys-color-surface-container-high);
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .homework-editor-toolbar-pages > .editor-toolbar-page-enter-active,
-  .homework-editor-toolbar-pages > .editor-toolbar-page-leave-active {
-    transition-duration: 0.01ms;
-  }
-}
-
 .homework-editor-image-tools m3e-slider {
   min-width: 0;
   width: 100%;
@@ -558,13 +540,6 @@
 .homework-link-confirm-preview {
   display: grid;
   gap: 0.5rem;
-}
-.homework-link-confirm-title {
-  display: block;
-  overflow-wrap: anywhere;
-  font-size: 1.0625rem;
-  font-weight: 500;
-  line-height: 1.45;
 }
 .homework-link-confirm-value {
   display: block;

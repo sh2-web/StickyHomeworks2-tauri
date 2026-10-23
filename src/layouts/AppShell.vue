@@ -1,55 +1,32 @@
 <script setup lang="ts">
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
 import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, provide, ref, watch } from "vue";
 import { RouterView, useRoute, useRouter } from "vue-router";
 import { appContextKey } from "../app-context";
-const HomeworkEditorDialog = defineAsyncComponent(() => import("../components/HomeworkEditorDialog.vue"));
 import HomeworkExportDialog from "../components/HomeworkExportDialog.vue";
 import WindowUnlockOverlay from "../components/WindowUnlockOverlay.vue";
+import { useAppBootstrap } from "../composables/useAppBootstrap";
+import { useAppDialogs, type DialogElement } from "../composables/useAppDialogs";
+import { useDesktopWindowControls } from "../composables/useDesktopWindowControls";
 import { useHomeworkEditor } from "../composables/useHomeworkEditor";
 import { useHomeworkStore } from "../composables/useHomeworkStore";
-import { useDesktopWindowControls, type WindowGeometryPatch } from "../composables/useDesktopWindowControls";
 import { useLinuxClipboardWorkaround } from "../composables/useLinuxClipboardWorkaround";
-import { hideWebKitGtkDialog, useWebKitGtkDialogExit } from "../composables/useWebKitGtkDialogExit";
-import type { AppSettings } from "../types/app-data";
+import { patchM3eAttributes } from "../m3e-internals";
 import { routeTransitionName } from "../router";
-import { logInfo, logWarn } from "../services/logging";
-import {
-  initializeGlycoprotein,
-  listenGlycoproteinWindowSettings,
-} from "../services/glycoprotein";
+import { logInfo } from "../services/logging";
+import type { AppSettings } from "../types/app-data";
 import "../styles/app-shell.css";
 
+const HomeworkEditorDialog = defineAsyncComponent(() => import("../components/HomeworkEditorDialog.vue"));
+
 type NavigationItem = "homeworks" | "templates" | "settings";
-
-type DialogElement = HTMLElement & {
-  show: () => void;
-  hide: () => void | Promise<void>;
-};
-
-type HomeworkEditorDialogElement = {
-  show: () => void;
-  hide: () => void | Promise<void>;
-};
 
 const route = useRoute();
 const router = useRouter();
 const isDrawerOpen = ref(false);
-const isMobileRuntime = ref(false);
-const viewportWidth = ref(0);
-const isMobileLayout = computed(() => isMobileRuntime.value && viewportWidth.value > 0 && viewportWidth.value < 950);
 const isHomeworkFrozen = ref(false);
-const loadError = ref("");
-const deleteError = ref("");
 const settingsError = ref("");
 const appDrawer = ref<HTMLElement | null>(null);
 const moreSheet = ref<DialogElement | null>(null);
-const editorDialog = ref<HomeworkEditorDialogElement | null>(null);
-const exportDialog = ref<InstanceType<typeof HomeworkExportDialog> | null>(null);
-const exitDialog = ref<DialogElement | null>(null);
-const deleteDialog = ref<DialogElement | null>(null);
-const deleteHomeworkId = ref<string | null>(null);
 const {
   isDesktopWindow,
   isUnlocked: isWindowUnlocked,
@@ -63,10 +40,6 @@ const {
   startDragging: startWindowDragging,
   setAlwaysOnBottom,
 } = useDesktopWindowControls();
-
-let stopAlwaysOnBottomWatch: (() => void) | undefined;
-let stopMainNavigate: (() => void) | undefined;
-let unlistenGlycoproteinWindowSettings: (() => void) | undefined;
 const {
   appData,
   homeworkGroups,
@@ -93,8 +66,6 @@ const {
 } = useHomeworkEditor({ appData, isHomeworkFrozen, saveHomework });
 
 useLinuxClipboardWorkaround();
-useWebKitGtkDialogExit(deleteDialog);
-useWebKitGtkDialogExit(exitDialog);
 
 const navigationItems: Array<{ id: NavigationItem; label: string; hint: string }> = [
   { id: "homeworks", label: "作业", hint: "home" },
@@ -114,6 +85,47 @@ const currentTitle = computed(() =>
 
 const currentContext = computed(() => activeNavigation.value === "homeworks" ? "今日任务" : currentTitle.value);
 
+const {
+  editorDialog,
+  exportDialog,
+  exitDialog,
+  deleteDialog,
+  deleteError,
+  openMountedHomeworkEditor,
+  openHomeworkExport,
+  closeHomeworkEditor,
+  saveEditedHomework,
+  requestDeleteHomework,
+  closeDeleteDialog,
+  requestCloseWindow,
+  closeExitDialog,
+  confirmDeleteHomework,
+} = useAppDialogs({
+  moreSheet,
+  isHomeworkFrozen,
+  saveHomeworkEditor,
+  resetHomeworkEditor,
+  deleteHomework,
+});
+
+const {
+  isMobileRuntime,
+  isMobileLayout,
+  loadError,
+  preserveMobileScrollPosition,
+  start: startAppBootstrap,
+  dispose: disposeAppBootstrap,
+} = useAppBootstrap({
+  appData,
+  appDrawer,
+  activeNavigation: () => activeNavigation.value,
+  load,
+  updateSettings,
+  initializeWindowControls,
+  setAlwaysOnBottom,
+  navigate: (path) => { void router.push(path); },
+});
+
 function toggleHomeworkFrozen() {
   isHomeworkFrozen.value = !isHomeworkFrozen.value;
   logInfo(isHomeworkFrozen.value ? "homework.freeze" : "homework.unfreeze", "作业冻结状态已变化");
@@ -132,76 +144,6 @@ function openCreateHomework() {
 
 function openEditHomework(id: string) {
   if (openEdit(id)) logInfo("homework.edit.request", "已请求编辑作业");
-}
-function openMountedHomeworkEditor() {
-  void nextTick(() => editorDialog.value?.show());
-}
-async function openHomeworkExport() {
-  await hideWebKitGtkDialog(moreSheet.value);
-  await nextTick();
-  exportDialog.value?.show();
-}
-
-
-
-
-async function closeHomeworkEditor() {
-  await hideWebKitGtkDialog(editorDialog.value);
-  resetHomeworkEditor();
-  logInfo("homework.editor.cancel", "作业编辑已取消");
-}
-
-async function saveEditedHomework() {
-  if (await saveHomeworkEditor()) {
-    await hideWebKitGtkDialog(editorDialog.value);
-    resetHomeworkEditor();
-    logInfo("homework.editor.close.after.save", "作业编辑已在保存后关闭");
-  }
-}
-
-function requestDeleteHomework(id: string) {
-  if (isHomeworkFrozen.value) {
-    logInfo("homework.delete.blocked", "冻结状态下删除作业被阻止");
-    return;
-  }
-
-  deleteHomeworkId.value = id;
-  deleteError.value = "";
-  logInfo("homework.delete.confirm.open", "已打开删除确认");
-  void nextTick(() => deleteDialog.value?.show());
-}
-
-async function closeDeleteDialog(logCancellation = true) {
-  await hideWebKitGtkDialog(deleteDialog.value);
-  deleteHomeworkId.value = null;
-  deleteError.value = "";
-  if (logCancellation) logInfo("homework.delete.cancel", "删除作业已取消");
-}
-watch(isHomeworkFrozen, (frozen) => {
-  if (!frozen) return;
-  void closeHomeworkEditor();
-  void closeDeleteDialog();
-});
-
-function requestCloseWindow() {
-  exitDialog.value?.show();
-  logInfo("window.close.request", "已打开关闭确认");
-}
-
-async function closeExitDialog() {
-  await hideWebKitGtkDialog(exitDialog.value);
-  logInfo("window.close.cancel", "关闭应用已取消");
-}
-
-async function confirmDeleteHomework() {
-  if (!deleteHomeworkId.value) return;
-
-  try {
-    await deleteHomework(deleteHomeworkId.value);
-    closeDeleteDialog(false);
-  } catch {
-    deleteError.value = "删除失败，请重试。";
-  }
 }
 
 async function updateAppSettings(mutate: (settings: AppSettings) => AppSettings) {
@@ -232,17 +174,6 @@ async function importLegacyData(profileContents: string | undefined, settingsCon
   }
 }
 
-function persistWindowGeometry(geometry: WindowGeometryPatch): Promise<void> {
-  return updateSettings((settings) => mergeSettingsPatch(settings, geometry));
-}
-
-function mergeSettingsPatch(settings: AppSettings, patch: Partial<AppSettings>): AppSettings {
-  const isUnchanged = Object.entries(patch).every(([key, value]) =>
-    settings[key as keyof AppSettings] === value,
-  );
-  return isUnchanged ? settings : { ...settings, ...patch };
-}
-
 provide(appContextKey, {
   appData,
   homeworkGroups,
@@ -271,110 +202,35 @@ function syncDrawerState(event: Event) {
 function syncMenuToggle(event: Event) {
   isDrawerOpen.value = (event.currentTarget as HTMLElement & { selected: boolean }).selected;
 }
-function syncDrawerContentOverflow() {
-  const content = appDrawer.value?.shadowRoot?.querySelector<HTMLElement>(".content");
-  if (!content) return;
-  const isHomeworkHome = activeNavigation.value === "homeworks";
-  content.style.overflowX = isHomeworkHome ? "hidden" : "";
-  content.style.overflowY = isHomeworkHome ? "hidden" : "";
-}
 
+/** 窗口解锁遮罩显示期间按 Esc 退出解锁；解锁结束或组件卸载时移除监听。 */
+let removeUnlockEscapeListener: (() => void) | undefined;
+watch(isWindowUnlocked, (unlocked) => {
+  removeUnlockEscapeListener?.();
+  removeUnlockEscapeListener = undefined;
+  if (!unlocked) return;
 
-function preserveMobileScrollPosition() {
-  if (!isMobileLayout.value) return;
-
-  const scrollTargets = [
-    document.scrollingElement,
-    appDrawer.value?.shadowRoot?.querySelector<HTMLElement>(".content"),
-  ].filter((target): target is HTMLElement => target instanceof HTMLElement);
-  const positions = scrollTargets.map((target) => ({ target, left: target.scrollLeft, top: target.scrollTop }));
-  const restore = () => positions.forEach(({ target, left, top }) => target.scrollTo(left, top));
-
-  requestAnimationFrame(() => {
-    restore();
-    requestAnimationFrame(restore);
-  });
-}
-watch(activeNavigation, () => nextTick(syncDrawerContentOverflow));
-watch(isMobileLayout, () => nextTick(syncDrawerContentOverflow));
-
-function updateViewportWidth() {
-  viewportWidth.value = window.innerWidth;
-}
-
-
-async function detectMobileRuntime() {
-  const layoutOverride = new URLSearchParams(window.location.search).get("layout");
-  if (import.meta.env.DEV && (layoutOverride === "mobile" || layoutOverride === "desktop")) {
-    return layoutOverride === "mobile";
-  }
-
-  try {
-    return (await invoke<"desktop" | "mobile">("runtime_layout")) === "mobile";
-  } catch (error) {
-    logWarn("runtime.layout.failure", error instanceof Error ? error.message : "runtime layout command failed");
-    return /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
-  }
-}
+  const onKeydown = (event: KeyboardEvent) => {
+    if (event.key !== "Escape") return;
+    event.preventDefault();
+    void toggleWindowUnlocked();
+  };
+  window.addEventListener("keydown", onKeydown);
+  removeUnlockEscapeListener = () => window.removeEventListener("keydown", onKeydown);
+});
 
 onMounted(async () => {
-  updateViewportWidth();
-  window.addEventListener("resize", updateViewportWidth);
-  isMobileRuntime.value = await detectMobileRuntime();
-  await nextTick();
-  syncDrawerContentOverflow();
-  if (!isMobileRuntime.value) {
-    try {
-      unlistenGlycoproteinWindowSettings = await listenGlycoproteinWindowSettings((patch) => {
-        void updateSettings((settings) => mergeSettingsPatch(settings, patch)).catch((error) => {
-          logWarn("glycoprotein.window-settings.save.failure", error instanceof Error ? error.message : String(error));
-        });
-      });
-    } catch (error) {
-      logWarn("glycoprotein.window-settings.listen.failure", error instanceof Error ? error.message : String(error));
-    }
-    try {
-      stopMainNavigate = await listen<string>("main-navigate", ({ payload }) => { void router.push(payload); });
-    } catch (error) {
-      logWarn("navigation.listen.failure", error instanceof Error ? error.message : String(error));
-    }
-  }
-
-  try {
-    await load();
-    logInfo("app.start", "应用数据加载完成");
-  } catch {
-    loadError.value = "无法读取本地数据。请检查应用数据目录后重试。";
-  }
-
-  if (!isMobileRuntime.value) {
-    try {
-      await initializeGlycoprotein();
-    } catch (error) {
-      logWarn("glycoprotein.initialize.failure", error instanceof Error ? error.message : String(error));
-    }
-  }
-
-  await initializeWindowControls(
-    isMobileRuntime.value,
-    appData.value.settings.alwaysOnBottom,
-    persistWindowGeometry,
-  );
-  stopAlwaysOnBottomWatch = watch(() => appData.value.settings.alwaysOnBottom, (alwaysOnBottom) => {
-    void setAlwaysOnBottom(alwaysOnBottom);
-  });
+  await startAppBootstrap();
 
   // M3E uses the attribute in Shadow DOM CSS, while Vue may set only the property.
   await nextTick();
-  moreSheet.value?.setAttribute("handle", "");
-  moreSheet.value?.setAttribute("detents", "fit half full");
+  patchM3eAttributes(moreSheet.value, { handle: "", detents: "fit half full" });
 });
 
 onUnmounted(() => {
-  window.removeEventListener("resize", updateViewportWidth);
-  stopAlwaysOnBottomWatch?.();
-  stopMainNavigate?.();
-  unlistenGlycoproteinWindowSettings?.();
+  removeUnlockEscapeListener?.();
+  removeUnlockEscapeListener = undefined;
+  disposeAppBootstrap();
 });
 </script>
 

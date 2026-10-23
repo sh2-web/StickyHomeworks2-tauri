@@ -23,7 +23,9 @@ export function useDesktopWindowControls() {
   let geometrySaveHandler: ((patch: WindowGeometryPatch) => void | Promise<void>) | undefined;
   let isClosing = false;
   const minimumWindowWidth = 240;
-  const minimumWindowHeight = 160;
+  // 与 domain/settings.ts 的 normalizeWindowDimension 和 Rust data.rs 的 240 下限保持一致，
+  // 否则 160–239 的窗口几何会被归一化丢弃。
+  const minimumWindowHeight = 240;
 
   function reportFailure(reason?: unknown) {
     logError("window.control.failure", reason ?? "窗口操作失败");

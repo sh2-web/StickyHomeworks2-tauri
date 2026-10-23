@@ -43,9 +43,3 @@ onMounted(() => void removePanelHeaderFromTabOrder());
     </m3e-expansion-panel>
   </div>
 </template>
-
-<style>
-.settings-expandable-section__content {
-  display: contents;
-}
-</style>
