@@ -42,8 +42,9 @@ export async function exportHomeworkImage(options: HomeworkExportOptions): Promi
 
   try {
     await waitForFonts();
-    await prepareImages(root);
+    // buildLayout 之后 root 里才有作业 DOM 与图片节点，此时再解码/替换图片。
     await buildLayout(root, options);
+    await prepareImages(root);
     await waitForM3eComponents(root);
 
     const cssWidth = Math.ceil(root.getBoundingClientRect().width || root.offsetWidth);
@@ -84,7 +85,8 @@ export async function saveHomeworkExport(
   document.body.append(anchor);
   anchor.click();
   anchor.remove();
-  URL.revokeObjectURL(url);
+  // 部分 WebView 会在 click 返回后仍异步读取 blob，立即 revoke 可能下载到空文件。
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
   return true;
 }
 

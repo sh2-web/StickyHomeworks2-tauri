@@ -4,7 +4,7 @@ import { removeGlobalTag, type SettingsMutator, updateAppSettings } from "../dom
 import { importLegacyData as importLegacyAppData, loadAppData, saveAppData } from "../services/app-data";
 import { createRequestId, logError, logInfo } from "../services/logging";
 import { createDefaultAppData, type AppData, type HomeworkRecord, type LegacyImportResult } from "../types/app-data";
-import { createSerialCommitQueue } from "./serialCommitQueue";
+import { COMMIT_TIMEOUT_MESSAGE, createSerialCommitQueue } from "./serialCommitQueue";
 
 type AppDataMutator = (data: AppData) => AppData;
 
@@ -20,15 +20,15 @@ export function useHomeworkStore(dependencies: Partial<HomeworkStoreDependencies
   const importData = dependencies.importData ?? importLegacyAppData;
   const appData = ref(createDefaultAppData());
   const homeworkGroups = computed(() => groupHomeworks(appData.value.homeworks, appData.value.settings));
-  const enqueueCommit = createSerialCommitQueue();
+  const enqueueCommit = createSerialCommitQueue({ timeoutMs: 20000 });
 
   async function load() {
     appData.value = await loadData();
   }
 
   function commit(operation: string, mutate: AppDataMutator) {
+    const requestId = createRequestId(operation);
     return enqueueCommit(async () => {
-      const requestId = createRequestId(operation);
       const before = appData.value;
       await logInfo(`${operation}.start`, "应用数据变更开始", requestId);
       try {
@@ -47,11 +47,16 @@ export function useHomeworkStore(dependencies: Partial<HomeworkStoreDependencies
         await logError(`${operation}.failure`, error, requestId);
         throw error;
       }
+    }).catch(async (error) => {
+      if (error instanceof Error && error.message === COMMIT_TIMEOUT_MESSAGE) {
+        await logError(`${operation}.timeout`, error, requestId);
+      }
+      throw error;
     });
   }
 
-  function saveHomework(homework: HomeworkRecord) {
-    return commit("homework.save", (data) => saveHomeworkRecord(data, homework));
+  function saveHomework(homework: HomeworkRecord, isNew = false) {
+    return commit("homework.save", (data) => saveHomeworkRecord(data, homework, isNew ? "create" : "update"));
   }
 
   function deleteHomework(homeworkId: string) {

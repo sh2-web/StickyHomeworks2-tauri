@@ -6,11 +6,12 @@ import { logError, logInfo } from "../services/logging";
 type HomeworkEditorOptions = {
   appData: Ref<AppData>;
   isHomeworkFrozen: Ref<boolean>;
-  saveHomework: (homework: HomeworkRecord) => Promise<void>;
+  saveHomework: (homework: HomeworkRecord, isNew: boolean) => Promise<void>;
 };
 
 export function useHomeworkEditor({ appData, isHomeworkFrozen, saveHomework }: HomeworkEditorOptions) {
   const editingHomework = ref<HomeworkRecord | null>(null);
+  const isNew = ref(false);
   const saveError = ref("");
   const editorSubjects = computed(() => uniqueVocabulary([
     ...appData.value.settings.subjects,
@@ -26,6 +27,7 @@ export function useHomeworkEditor({ appData, isHomeworkFrozen, saveHomework }: H
     }
 
     const lastHomework = appData.value.homeworks[appData.value.homeworks.length - 1];
+    isNew.value = true;
     editingHomework.value = {
       id: createHomeworkId(),
       content: { kind: "plain-text", text: "" },
@@ -57,6 +59,7 @@ export function useHomeworkEditor({ appData, isHomeworkFrozen, saveHomework }: H
       dueTime: toDateInputValue(homework.dueTime),
       tags: homework.tags.filter((tag) => editorTags.value.includes(tag)),
     };
+    isNew.value = false;
     resetFormMessages();
     logInfo("homework.edit.open", "作业编辑器已打开");
     return true;
@@ -108,7 +111,7 @@ export function useHomeworkEditor({ appData, isHomeworkFrozen, saveHomework }: H
 
     logInfo("homework.save.start", "作业保存已开始");
     try {
-      await saveHomework(editingHomework.value);
+      await saveHomework(editingHomework.value, isNew.value);
       logInfo("homework.save.success", "作业保存成功");
       return true;
     } catch (error) {

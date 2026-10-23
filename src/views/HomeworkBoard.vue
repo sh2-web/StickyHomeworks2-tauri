@@ -20,6 +20,14 @@ const groups = computed(() => props.groups);
 const homeworkScale = computed(() => props.homeworkScale / 100);
 const scrollRegion = ref<HTMLElement | null>(null);
 
+/**
+ * 分组 id 现在是科目名（可能含空格等字符），DOM id 必须编码后才能安全用于
+ * `id` 与 `aria-labelledby`（空格会破坏 aria 引用解析）。
+ */
+function subjectElementId(groupId: string): string {
+  return `subject-${encodeURIComponent(groupId)}`;
+}
+
 function setScrollRegionElement(element: Element | ComponentPublicInstance | null) {
   scrollRegion.value = element instanceof HTMLElement ? element : null;
   setScrollElement(element);
@@ -130,8 +138,8 @@ function deleteHomework(id: string) {
         <div class="homework-scale-content" :style="{ '--homework-scale': homeworkScale }">
           <div class="masonry-columns" :style="{ '--homework-column-count': masonryColumns.length, '--homework-panel-width': `${maxPanelWidth}px` }">
             <div v-for="(column, columnIndex) in masonryColumns" :key="columnIndex" class="masonry-column">
-              <section v-for="group in column" :key="group.id" :ref="(element) => setGroupElement(group.id, element)" class="subject-group" :aria-labelledby="`subject-${group.id}`">
-                <m3e-heading :id="`subject-${group.id}`" variant="headline" size="small" level="2">{{ group.name }}</m3e-heading>
+              <section v-for="group in column" :key="group.id" :ref="(element) => setGroupElement(group.id, element)" class="subject-group" :aria-labelledby="subjectElementId(group.id)">
+                <m3e-heading :id="subjectElementId(group.id)" variant="headline" size="small" level="2">{{ group.name }}</m3e-heading>
                 <m3e-list class="subject-homework-list" variant="segmented">
                   <m3e-list-action v-for="homework in group.homeworks" :key="homework.id" class="homework-item" :class="{ 'homework-item--selected': selectedHomeworkId === homework.id, 'homework-item--expired': homework.expired }" :style="homework.expired ? { '--homework-expired-color': homework.expiredMarkColor } : undefined" @click="handleHomeworkClick($event, homework.id)">
                     <span class="homework-content"><span class="homework-marker" aria-hidden="true"></span><span class="homework-text" v-html="homework.content"></span></span>
