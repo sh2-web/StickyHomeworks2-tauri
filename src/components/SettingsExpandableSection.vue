@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { nextTick, onMounted, ref } from "vue";
+import { hideM3eExpansionHeaderFromTabOrder } from "../m3e-internals";
 import "../styles/settings-view.css";
 
 type ExpansionPanelElement = HTMLElement & { updateComplete: Promise<boolean> };
@@ -24,8 +25,8 @@ async function removePanelHeaderFromTabOrder() {
   const panel = root.value?.querySelector("m3e-expansion-panel") as ExpansionPanelElement | null;
   if (!panel) return;
   await panel.updateComplete;
-  const header = panel.shadowRoot?.querySelector<HTMLElement>("m3e-expansion-header");
-  if (header) header.tabIndex = -1;
+  // Shadow DOM 访问统一走 m3e-internals（结构变化时静默退化，不阻断设置页）。
+  hideM3eExpansionHeaderFromTabOrder(panel);
 }
 
 onMounted(() => void removePanelHeaderFromTabOrder());
