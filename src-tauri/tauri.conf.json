@@ -16,7 +16,8 @@
         "title": "stickyhomeworks2N",
         "transparent": true,
         "decorations": false,
-        "resizable": false
+        "resizable": false,
+        "visible": false
       },
       {
         "label": "tray-menu",
@@ -35,7 +36,7 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; media-src 'self' data: blob:; connect-src 'self' ipc: http://ipc.localhost ws://localhost:1420 ws://127.0.0.1:1420; object-src 'none'; base-uri 'self'; form-action 'self'"
     }
   },
   "bundle": {
