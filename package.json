@@ -10,7 +10,6 @@
     "tauri": "tauri"
   },
   "dependencies": {
-    "@m3e/icons": "^1.0.20",
     "@m3e/web": "^2.10.0",
     "@tauri-apps/api": "^2.12.4",
     "@tauri-apps/plugin-autostart": "^2.7.0",
