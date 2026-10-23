@@ -252,6 +252,9 @@ pub(crate) async fn initialize_glycoprotein(
             )
         })?
     };
+    // 插件在窗口 ready 时已做过一次恢复，但未装饰窗口当时的 frame 偏移不准（会多一个
+    // 标题栏高度），这里在窗口仍隐藏、frame 已稳定的时刻按保存值精确校正一次。
+    correct_window_geometry_from_plugin(&app);
     // 一次性迁移：旧版本把窗口几何存在 settings 里，现在由 window-state 插件接管。
     let migrated = migrate_legacy_window_geometry(&app, &mut data);
     let (mut data, status) =
@@ -304,21 +307,13 @@ fn migrate_legacy_window_geometry(app: &AppHandle, data: &mut AppData) -> bool {
         .map(|path| path.exists())
         .unwrap_or(false);
     if !plugin_has_state {
-        if let Some(window) = app.get_webview_window("main") {
-            if let (Some(x), Some(y)) = (data.settings.window_x, data.settings.window_y) {
-                let _ = window.set_position(tauri::Position::Physical(
-                    tauri::PhysicalPosition::new(x.round() as i32, y.round() as i32),
-                ));
-            }
-            if let (Some(width), Some(height)) =
-                (data.settings.window_width, data.settings.window_height)
-            {
-                let _ = window.set_size(tauri::Size::Physical(tauri::PhysicalSize::new(
-                    width.round() as u32,
-                    height.round() as u32,
-                )));
-            }
-        }
+        let width = data.settings.window_width;
+        let height = data.settings.window_height;
+        let x = data.settings.window_x;
+        let y = data.settings.window_y;
+        // 未装饰窗口在第一次 SetWindowPos 之前的 client/window 偏移包含一个标题栏高度，
+        // 因此旧值恢复走 apply_window_geometry 的 settle 流程，避免多出一个标题栏。
+        apply_window_geometry(app, width, height, x, y, true);
     }
 
     data.settings.window_x = None;
@@ -340,6 +335,80 @@ fn migrate_legacy_window_geometry(app: &AppHandle, data: &mut AppData) -> bool {
         },
     );
     true
+}
+
+/// `.window-state.json` 里 `main` 窗口保存的几何（物理像素，inner size + outer position）。
+struct SavedWindowGeometry {
+    width: f64,
+    height: f64,
+    x: Option<f64>,
+    y: Option<f64>,
+}
+
+fn read_saved_window_geometry(app: &AppHandle) -> Option<SavedWindowGeometry> {
+    let path = window_state_path(app)?;
+    let contents = fs::read_to_string(path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&contents).ok()?;
+    let main = value.get("main")?;
+    Some(SavedWindowGeometry {
+        width: main.get("width")?.as_f64()?,
+        height: main.get("height")?.as_f64()?,
+        x: main.get("x").and_then(serde_json::Value::as_f64),
+        y: main.get("y").and_then(serde_json::Value::as_f64),
+    })
+}
+
+/// 应用窗口几何。
+///
+/// **为什么不是简单调一次 `set_size`**：主窗口是 `decorations: false` + 阴影窗口，tao 在
+/// `set_inner_size` 里用「当前 window rect - client rect」补偿隐藏边框；窗口在第一次
+/// `SetWindowPos` 之前这个偏移还包含一个标题栏高度（实测 96 DPI 下 31px），于是
+/// `set_size(w, h)` 会得到 `h + 31` 的 client 高度；而每次退出又把这个偏大的值写回
+/// window-state，导致每次启动窗口都长高一截。
+///
+/// `settle_first` 时先按当前尺寸触发一次 `set_size` 让 frame 稳定，再设置目标尺寸。
+fn apply_window_geometry(
+    app: &AppHandle,
+    width: Option<f64>,
+    height: Option<f64>,
+    x: Option<f64>,
+    y: Option<f64>,
+    settle_first: bool,
+) {
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+
+    if settle_first {
+        if let Ok(current) = window.inner_size() {
+            let _ = window.set_size(current);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(60));
+    }
+
+    if let (Some(width), Some(height)) = (width, height) {
+        let _ = window.set_size(tauri::PhysicalSize::new(
+            width.round().max(1.0) as u32,
+            height.round().max(1.0) as u32,
+        ));
+    }
+    if let (Some(x), Some(y)) = (x, y) {
+        let _ = window.set_position(tauri::PhysicalPosition::new(
+            x.round() as i32,
+            y.round() as i32,
+        ));
+    }
+}
+
+/// 修正 window-state 插件「窗口 ready 时恢复」造成的尺寸偏差。
+///
+/// 插件在窗口 ready 时调 `set_size`，此时未装饰窗口的 frame 还没稳定，会多算一个标题栏
+/// 高度；启动后期（前端 `initialize_glycoprotein`，窗口仍隐藏）frame 已经稳定，按保存值
+/// 再设置一次即可精确恢复，同时把正确尺寸写回插件缓存，退出时保存的就是正确值。
+fn correct_window_geometry_from_plugin(app: &AppHandle) {
+    if let Some(saved) = read_saved_window_geometry(app) {
+        apply_window_geometry(app, Some(saved.width), Some(saved.height), saved.x, saved.y, false);
+    }
 }
 
 #[tauri::command]
